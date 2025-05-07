@@ -8,8 +8,8 @@ from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
                           CallbackQueryHandler, ContextTypes, filters)
 
 # === CONFIG ===
-BOT_TOKEN = "PASTE_YOUR_TOKEN_HERE"
-WEBHOOK_URL = "https://your-render-url.onrender.com"  # Không có dấu "/" ở cuối
+BOT_TOKEN = "7243590811:AAGY-Py_DP_561bc2DsPjFKkZTuvp7mSl0o"
+WEBHOOK_URL = "https://new-x08j.onrender.com"  # Không có dấu "/" ở cuối
 PORT = 8080
 
 # === GAME STATE ===
