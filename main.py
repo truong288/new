@@ -224,5 +224,7 @@ def home():
 
 
 if __name__ == '__main__':
+    import nest_asyncio
+    nest_asyncio.apply()
     asyncio.run(setup_webhook())
-    flask_app.run(host="0.0.0.0", port=8080)
+
