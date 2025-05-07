@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: telegram-bot-game
+    env: python
+    plan: free
+    buildCommand: ""
+    startCommand: python3 main.py
+    envVars:
+      - key: BOT_TOKEN
+        value: <PASTE_YOUR_BOT_TOKEN>
+      - key: WEBHOOK_URL
+        value: https://<your-app-name>.onrender.com
