@@ -1,18 +1,16 @@
-import json
-import os
-import asyncio
-import threading
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
-                          CallbackQueryHandler, ContextTypes, filters)
+import os
 
-# === CONFIG ===
-BOT_TOKEN = "7243590811:AAGY-Py_DP_561bc2DsPjFKkZTuvp7mSl0o"
-WEBHOOK_URL = "https://new-x08j.onrender.com"  # Không có dấu "/" ở cuối
-PORT = 8080
+# Tạo ứng dụng Flask
+app = Flask(__name__)
 
-# === GAME STATE ===
+# Token bot Telegram
+TOKEN = "7243590811:AAGY-Py_DP_561bc2DsPjFKkZTuvp7mSl0o"  # Thay bằng token thật
+bot = ApplicationBuilder().token(TOKEN).build()
+
+# Game state
 players = []
 current_phrase = ""
 used_phrases = {}
@@ -21,24 +19,7 @@ in_game = False
 waiting_for_phrase = False
 turn_timeout_task = None
 
-# === WINNERS FILE ===
-WINNER_FILE = "winners.json"
-
-
-def load_winners():
-    if os.path.exists(WINNER_FILE):
-        with open(WINNER_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-
-def save_winner(user_id):
-    winners = load_winners()
-    winners[str(user_id)] = winners.get(str(user_id), 0) + 1
-    with open(WINNER_FILE, "w") as f:
-        json.dump(winners, f)
-
-
+# Reset game
 def reset_game():
     global players, current_phrase, used_phrases, current_player_index, in_game, waiting_for_phrase, turn_timeout_task
     players = []
@@ -51,89 +32,102 @@ def reset_game():
         turn_timeout_task.cancel()
         turn_timeout_task = None
 
+# Đặt webhook
+def set_webhook():
+    webhook_url = os.getenv("WEBHOOK_URL")  # URL webhook từ Render
+    bot.set_webhook(url=webhook_url + "/webhook")
 
-# === HANDLERS ===
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Gõ /play để bắt đầu trò chơi nối cụm từ!")
-
-
+# Các hàm xử lý lệnh
 async def start_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reset_game()
+    reset_game()  # Reset lại các trạng thái của trò chơi
     global in_game
-    in_game = True
-    keyboard = [
-        [InlineKeyboardButton("✅ Tham gia", callback_data='join')],
-        [InlineKeyboardButton("▶️ Bắt đầu", callback_data='begin')]
-    ]
-    await update.message.reply_text("🎮 Trò chơi bắt đầu! Bấm để tham gia hoặc bắt đầu:", reply_markup=InlineKeyboardMarkup(keyboard))
+    in_game = True  # Đánh dấu trò chơi đã bắt đầu
 
+    # Gửi thông báo cho người chơi khi trò chơi bắt đầu
+    await update.message.reply_text("🎮 Trò chơi bắt đầu!\nGõ /join để tham gia trò chơi.\nGõ /begin để bắt đầu lượt đầu tiên.")
 
-async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
-
-    if query.data == "join":
-        if user.id not in players:
-            players.append(user.id)
-            await query.message.reply_text(f"✅ {user.first_name} đã tham gia.")
-        else:
-            await query.message.reply_text("⚠️ Bạn đã tham gia rồi!")
-
-    elif query.data == "begin":
-        if len(players) < 2:
-            await query.message.reply_text("❗ Cần ít nhất 2 người chơi.")
-            return
-        await query.message.delete()
-        await begin_game(update, context)
-
+async def join_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global players
+    user = update.effective_user
+    if user.id not in players:
+        players.append(user.id)
+        await update.message.reply_text(f"✅ {user.first_name} đã tham gia... (Tổng {len(players)} )")
+    else:
+        await update.message.reply_text("⚠️ Bạn đã tham gia rồi!")
 
 async def begin_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global waiting_for_phrase
+    global current_player_index, waiting_for_phrase
+    if len(players) < 2:
+        await update.message.reply_text("❗ Cần ít nhất 2 người chơi để bắt đầu.")
+        return
+
     waiting_for_phrase = True
     user_id = players[current_player_index]
     chat = await context.bot.get_chat(user_id)
     mention = f"<a href='tg://user?id={user_id}'>@{chat.username or chat.first_name}</a>"
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✏️ {mention}, hãy nhập cụm từ đầu tiên!", parse_mode="HTML")
+
+    await update.message.reply_text(
+        f"✏️ {mention}, hãy nhập cụm từ đầu tiên để bắt đầu trò chơi!",
+        parse_mode="HTML")
     await start_turn_timer(context)
 
-
 async def play_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global current_phrase, current_player_index, used_phrases, players, in_game, waiting_for_phrase
+    global current_phrase, current_player_index, used_phrases, players, in_game, waiting_for_phrase, turn_timeout_task
+
     if not in_game:
         return
+
     user = update.effective_user
     text = update.message.text.strip().lower()
+
     if user.id != players[current_player_index]:
         return
-    words = text.split()
-    if len(words) != 2:
-        await eliminate_player(update, context, "Cụm từ phải gồm đúng 2 từ.")
-        return
+
     if waiting_for_phrase:
         current_phrase = text
         used_phrases[text] = 1
         waiting_for_phrase = False
-    else:
-        if words[0] != current_phrase.split()[-1]:
-            await eliminate_player(update, context, "Từ đầu không khớp.")
-            return
-        if text in used_phrases:
-            await eliminate_player(update, context, "Cụm từ đã được dùng.")
-            return
-        used_phrases[text] = 1
-        current_phrase = text
+        current_player_index = (current_player_index + 1) % len(players)
 
-    current_player_index = (current_player_index + 1) % len(players)
-    if len(players) == 1:
-        await announce_winner(update, context, players[0])
+        next_id = players[current_player_index]
+        next_chat = await context.bot.get_chat(next_id)
+        mention = f"<a href='tg://user?id={next_id}'>@{next_chat.username or next_chat.first_name}</a>"
+
+        await update.message.reply_text(
+            f"✅ Từ bắt đầu là: '{text}'. {mention}, hãy nối với từ '{text.split()[-1]}'",
+            parse_mode="HTML")
+        await start_turn_timer(context)
         return
+
+    if text.split()[0] != current_phrase.split()[-1]:
+        await eliminate_player(update, context, reason="Không đúng từ nối")
+        return
+
+    if used_phrases.get(text, 0) >= 2:
+        await eliminate_player(update, context, reason="Cụm từ bị lặp quá giới hạn")
+        return
+
+    used_phrases[text] = used_phrases.get(text, 0) + 1
+    current_phrase = text
+    current_player_index = (current_player_index + 1) % len(players)
+
+    if len(players) == 1:
+        winner_id = players[0]
+        chat = await context.bot.get_chat(winner_id)
+        mention = f"<a href='tg://user?id={winner_id}'>@{chat.username or chat.first_name}</a>"
+        await update.message.reply_text(f"🏆 {mention} GIÀNH CHIẾN THẮNG!",
+                                        parse_mode="HTML")
+        reset_game()
+        return
+
     next_id = players[current_player_index]
     next_chat = await context.bot.get_chat(next_id)
-    mention = f"<a href='tg://user?id={next_id}'>@{next_chat.username or next_chat.first_name}</a>"
-    await update.message.reply_text(f"✅ '{words[-1]}' đúng! {mention}, tới lượt bạn.", parse_mode="HTML")
-    await start_turn_timer(context)
+    next_mention = f"<a href='tg://user?id={next_id}'>@{next_chat.username or next_chat.first_name}</a>"
 
+    await update.message.reply_text(
+        f"✅ Hợp lệ! '{text.split()[-1]}' là từ cần nối tiếp. {next_mention}, tới lượt bạn!",
+        parse_mode="HTML")
+    await start_turn_timer(context)
 
 async def eliminate_player(update, context, reason):
     global players, current_player_index
@@ -142,84 +136,73 @@ async def eliminate_player(update, context, reason):
     players.remove(user.id)
     if current_player_index >= len(players):
         current_player_index = 0
+
     if len(players) == 1:
-        await announce_winner(update, context, players[0])
+        winner_id = players[0]
+        chat = await context.bot.get_chat(winner_id)
+        mention = f"<a href='tg://user?id={winner_id}'>@{chat.username or chat.first_name}</a>"
+        await update.message.reply_text(f"🏆 {mention} GIÀNH CHIẾN THẮNG!", parse_mode="HTML")
+        reset_game()
     else:
+        await update.message.reply_text(f"Hiện còn lại {len(players)} người chơi.")
         await start_turn_timer(context)
-
-
-async def announce_winner(update, context, winner_id):
-    chat = await context.bot.get_chat(winner_id)
-    mention = f"<a href='tg://user?id={winner_id}'>@{chat.username or chat.first_name}</a>"
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"🏆 {mention} GIÀNH CHIẾN THẮNG!", parse_mode="HTML")
-    save_winner(winner_id)
-    reset_game()
-
-
-async def show_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    winners = load_winners()
-    sorted_winners = sorted(winners.items(), key=lambda x: x[1], reverse=True)
-    msg = "🏅 Bảng xếp hạng:\n"
-    for uid, score in sorted_winners[:5]:
-        chat = await context.bot.get_chat(int(uid))
-        name = chat.username or chat.first_name
-        msg += f"• {name}: {score} lần thắng\n"
-    await update.message.reply_text(msg)
-
 
 async def start_turn_timer(context):
     global turn_timeout_task
     if turn_timeout_task:
         turn_timeout_task.cancel()
+    turn_timeout_task = asyncio.create_task(turn_timer(context))
 
-    async def timeout():
-        await asyncio.sleep(30)
+async def turn_timer(context):
+    global players, current_player_index
+    try:
+        await asyncio.sleep(59)
         user_id = players[current_player_index]
         chat = await context.bot.get_chat(user_id)
-        await context.bot.send_message(chat_id=chat.id, text="⌛ Hết giờ! Bạn bị loại.")
-        update = Update(update_id=0, message=None)
-        update.effective_user = chat
-        await eliminate_player(update, context, "Hết thời gian")
+        mention = f"<a href='tg://user?id={user_id}'>@{chat.username or chat.first_name}</a>"
 
-    turn_timeout_task = asyncio.create_task(timeout())
+        await context.bot.send_message(
+            chat_id=context._chat_id,
+            text=f"⏰ {mention} hết thời gian và bị loại!",
+            parse_mode="HTML")
+        players.remove(user_id)
 
+        if len(players) == 1:
+            winner_id = players[0]
+            winner_chat = await context.bot.get_chat(winner_id)
+            mention = f"<a href='tg://user?id={winner_id}'>@{winner_id}</a>"
+            await context.bot.send_message(
+                chat_id=context._chat_id,
+                text=f"🏆 {mention} GIÀNH CHIẾN THẮNG!",
+                parse_mode="HTML")
+            reset_game()
+            return
 
-# === FLASK APP ===
-flask_app = Flask(__name__)
-app = ApplicationBuilder().token(BOT_TOKEN).build()
+        if current_player_index >= len(players):
+            current_player_index = 0
 
+        await start_turn_timer(context)
 
-@flask_app.route('/')
-def index():
-    return "Bot is alive!"
+    except asyncio.CancelledError:
+        pass
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("/startgame - bắt đầu trò chơi\n/join - tham gia\n/begin - người đầu tiên nhập cụm từ\n/help - hướng dẫn")
 
-@flask_app.route('/webhook', methods=["POST"])
-async def webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, app.bot)
-    await app.process_update(update)
+# Định nghĩa route cho Flask để nhận webhook từ Telegram
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    json_str = request.get_data().decode("UTF-8")
+    update = Update.de_json(json_str, bot)
+    bot.process_update(update)
     return "OK"
 
+# Định nghĩa route chính để kiểm tra trạng thái
+@app.route('/')
+def index():
+    return "Bot is running!"
 
-async def setup_webhook():
-    await app.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
-
-
-def run_flask():
-    flask_app.run(host="0.0.0.0", port=PORT)
-
-
-# === MAIN ===
+# Đặt webhook khi bắt đầu ứng dụng
 if __name__ == '__main__':
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("play", start_game))
-    app.add_handler(CommandHandler("top", show_leaderboard))
-    app.add_handler(CallbackQueryHandler(menu_button))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, play_word))
-
-    # Chạy Flask trong thread phụ
-    threading.Thread(target=run_flask).start()
-
-    # Chạy Telegram app + webhook
-    asyncio.run(setup_webhook())
+    set_webhook()  # Đặt webhook khi bot bắt đầu
+    app.run(host="0.0.0.0", port=5000)  # Render sẽ cung cấp cổng 5000
